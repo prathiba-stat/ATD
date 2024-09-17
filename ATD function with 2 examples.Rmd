@@ -1,0 +1,207 @@
+---
+title: "Example"
+authors: "Kayla Schroeder and Prathiba Batley"
+output: html_document
+---
+```{r}
+theory_b <- 1
+A_mat <- function(m, n){
+  list_of_As <- vector(mode='list', length=n)
+  vec_of_ones <- as.matrix(rep(1,m))
+  for (i in 1:n){
+    list_of_As[[i]] <- diag(rep(1,m)) - (vec_of_ones%*%t(vec_of_ones))/m
+  }
+  return(as.matrix(Matrix::bdiag(list_of_As)))
+}
+
+# Function to Calculate the Sigma Matrix
+
+sig_mat <- function(m, n, tau, sigma, phi){
+  all_i_matrices <- vector(mode='list', length=n)
+  for (i in 1:n){
+    row_matrices_list <- vector(mode='list', length=n)
+    for (j in 1:n){
+      row_matrices_list[[j]] <- (tau^2 + (sigma^2)*phi^abs(i-j))*as.matrix(diag(rep(1,m)))
+    }
+    # Combine all i th row matrices into a matrix
+    all_i_matrices[[i]] <- do.call(cbind, row_matrices_list)
+  }
+  # Combine all matrix rows 
+  return(do.call(rbind,all_i_matrices))
+  
+}
+
+# Now we create a function to get the theoretical values for df, non-centrality parameter and theoretical variance
+theory_func <- function(m, n, phi, tau_sq, sigma_sq, mu, alpha_ij, b){
+  # Get A matrix
+  theory_a_mat <- A_mat(m, n)
+  # Get sigma matrix
+  theory_sig_mat <- sig_mat(m, n, sqrt(tau_sq), sqrt(sigma_sq), phi)
+
+  # Now we calculate the parameter rho to allow us to pull sigma squared and tau squared out of the sigma matrix
+  rho <- tau_sq/(sigma_sq+tau_sq)
+
+  # We can then use rho to define a new matrix that is equivalent to the sigma matrix when multiplied by (sigma squared + tau squared). We will call this matrix sigma tilda
+  sig_tilda_mat <- theory_sig_mat/(sigma_sq+tau_sq)
+
+  # Create a vector of alternating 1s and -1s to describe the alternating treatment structure for each individual
+  alt <- rep(c(rep(1,m),rep(-1,m)),n/2)
+  # This needs to be altered for the case of odd n 
+  
+
+  # We use this to compute the known constant 'a' from the theorem in Hedges 2007 
+  # First we calculate the variance of the differences in the treatment and control
+  a <- as.matrix(t(alt))%*%(theory_sig_mat)%*%as.matrix(alt)
+  dim(a) <- NULL # this line is necessary to remove the matrix dimensions of 1 row, 1 column 
+  # Then we multiply by (2/mn)^2 since the sample size for both the treatment and the control groups is mn/2 (if we only consider even m and n values) so since this is the variance we square this value
+  a <- (a*4)/((m^2)*(n^2))
+
+  # Compute trace of A*Sigma*A*Sigma
+  asigasig_tr <- sum(diag(theory_a_mat%*%theory_sig_mat%*%theory_a_mat%*%theory_sig_mat), na.rm = T)
+
+  # Compute trace of A*SigmaTilda*A*SigmaTilda
+  asigtildaasigtilda_tr <- sum(diag(theory_a_mat%*%sig_tilda_mat%*%theory_a_mat%*%sig_tilda_mat), na.rm = T)
+
+  # We use this value to compute the known constant 'c' from the theorem in Hedges 2007
+  c <- asigtildaasigtilda_tr/((n*(m-1))^2)  
+
+  # Now we want to find the noncentral t distribution of described by the theorem in Hedges 2007
+  dist_df <- b^2/c
+  ncp <- sqrt(b/a)*(alpha_ij/sqrt(sigma_sq+tau_sq)) 
+
+  # We know that the variance of the t distribution is df/(df-2) so we multiply this by (the square root of b/a)^2 to get the theoretical variance
+  theory_var <- (b/a)*dist_df/(dist_df-2) 
+  return(list("TheoreticalVariance"=theory_var,"df"=dist_df,"ncp"=ncp,"a"=a,"c"=c))
+  
+}
+```
+
+
+```{r}
+compute.atd <- function(ex_m, ex_n, ex_control_Y_mat, ex_trt_Y_mat){
+  ex_full_Y_mat <- matrix(NA,nrow=ex_m, ncol=ex_n)
+ex_full_Y_mat[,(1:ex_n)%%2==0] <- ex_control_Y_mat
+ex_full_Y_mat[,(1:ex_n)%%2!=0] <- ex_trt_Y_mat
+ex_trt_control_vec <- rep(NA,ex_n)
+ex_trt_control_vec[seq(1,ex_n,by=2)] <- rep("Treatment",ex_n/2)
+ex_trt_control_vec[seq(2,ex_n,by=2)] <- rep("Control",ex_n/2)
+ex_df_overall <- matrix(NA, 0, 4)
+for (i in 1:ex_m){
+  ex_df_overall <- rbind(ex_df_overall, data.frame(subj_name = rep(paste0("Subject", " i"),ex_n),   trt_or_control = ex_trt_control_vec,x = 1:ex_n,y=ex_full_Y_mat[i,]))
+  
+}
+# Trellis Plot
+#png("example1.png",height=600, width = 1100)
+plot_ex <- lattice::xyplot(y~x|subj_name,data=ex_df_overall,groups = trt_or_control,type = "l",lty=1:2,col="deeppink",layout=c(1,3),ylab="Percentage Correct on CBM Probes",xlab = "Sessions",key = list(space = "right", title = "Phase", lines = list(col="deeppink", lty=1:2),text=list(c("Control", "Treatment"))))
+plot_ex
+
+# Now we want to calculate the between person standard deviation for each time point
+ex_betw_ppl_sd <- apply(ex_full_Y_mat,2,sd)
+# Now we need the across person variance pooled across time points
+ex_samp_var <- (sum((ex_m-1)*ex_betw_ppl_sd^2))/(ex_n*ex_m-ex_n)
+# We use this to calculate the effect size (Cohen's d)
+ex_cohens_d <- (mean(ex_trt_Y_mat)-mean(ex_control_Y_mat))/sqrt(ex_samp_var)
+# Now we want to estimate the value of phi 
+ex_phase_length <- ex_n/2 # length of each phase
+# Average across observations for individual i in phase 1 
+ex_y_a1_i_bar_dot <- rowSums(ex_trt_Y_mat)/ex_phase_length
+# Average across observations for individual i in phase 2 
+ex_y_a2_i_bar_dot <- rowSums(ex_control_Y_mat)/ex_phase_length
+# Calculate the deviations from treatment and control means for each observation (deviation from the observation's respective group)
+ex_deviation_Y_mat <- matrix(NA,nrow=ex_m, ncol=ex_n)
+ex_deviation_Y_mat[,(1:ex_n)%%2==0] <- sweep(ex_control_Y_mat, 1, ex_y_a2_i_bar_dot)
+ex_deviation_Y_mat[,(1:ex_n)%%2!=0] <- sweep(ex_trt_Y_mat, 1, ex_y_a1_i_bar_dot)
+# Calculate the values of gamma i a when h = 0
+# Treatment
+ex_gamma_a1_i_h0 <- (1/ex_phase_length)*rowSums((ex_deviation_Y_mat[,-c(ex_n-1,ex_n)])^2)
+# Control
+ex_gamma_a2_i_h0 <- (1/ex_phase_length)*rowSums((ex_deviation_Y_mat[,-c(1,ex_n)])^2)
+# Calculate the values of gamma i a when h = 1
+# Treatment: we are not interested in the last observation since this is a control group observation. We transform the second matrix since we want the product of lag 0 and lag 1 deviations.
+ex_gamma_a1_i_h1 <- (1/ex_phase_length)*diag(t(ex_deviation_Y_mat[,-c(ex_n-1,ex_n)])%*%ex_deviation_Y_mat[,-c(1,ex_n)])
+    # Control: we are not interested in the first observation since this is a treatment group observation. We transform the second matrix since we want the product of lag 0 and lag 1 deviations.
+ex_gamma_a2_i_h1 <- (1/ex_phase_length)*diag(t(ex_deviation_Y_mat[,-c(1,ex_n)])%*%ex_deviation_Y_mat[,-c(1,2,ex_n)])
+     
+ex_gamma_dot_dot_h0 <- (sum(ex_gamma_a1_i_h0)+sum(ex_gamma_a2_i_h0))/(2*ex_m)
+ex_gamma_dot_dot_h1 <- (sum(ex_gamma_a1_i_h1)+sum(ex_gamma_a2_i_h1))/(2*ex_m)
+ex_phi_hat <- (ex_gamma_dot_dot_h1/ex_gamma_dot_dot_h0) + (1/ex_phase_length)
+# We also want to estimate the value of rho
+# First we calculate b1
+ex_b1_summation <- rep(NA,ex_phase_length-1)
+for (ex_t in 1:(ex_phase_length-1)){
+  ex_b1_summation[ex_t] <- (ex_phi_hat^ex_t)*(ex_phase_length-ex_t)
+}
+ex_b1 <- (1/ex_phase_length) + (2/(ex_phase_length^2))*sum(ex_b1_summation)
+ex_rho_hat <- 1 - (ex_gamma_dot_dot_h0/(1-ex_b1))*(1/ex_samp_var)
+ex_results <- list("CohensD"=ex_cohens_d,"ControlMean"=mean(ex_control_Y_mat),"TreatmentMean"=mean(ex_trt_Y_mat),"SampleVariance"=ex_samp_var,"EstimatedPhi"=ex_phi_hat,"EstimatedRho"=ex_rho_hat) 
+ex_results
+
+# We let alpha_ij equal 0 since it only impacts the non-centrality parameter which we don't need for our analysis
+ex_est_theory <- theory_func(ex_m, ex_n, ex_results$EstimatedPhi, ex_results$EstimatedRho, 1-ex_results$EstimatedRho, mu = 0, alpha_ij = 0, theory_b)
+# Output df
+ex_est_theory$df
+
+#We then use this information to calculate the variance of the effect size
+ex_cohensd_var <- ex_est_theory$a + (ex_results$CohensD^2)/(2*ex_est_theory$df)
+ex_cohensd_var
+results <- data.frame(ex_results, ex_est_theory$df, ex_cohensd_var)
+colnames(results) <- c("d", "Control Mean", "Treatment Mean", 
+                       "Sample Variance", "Est.Phi", "Est.Rho", "df", "es-variance")
+return(results)
+
+}
+```
+
+
+# Example 1
+
+Paper: Reading Comprehension Interventions for Students With Autism Spectrum Disorders: An Alternating Treatments Comparison 
+Author: Solis et al.
+Link: https://journals.sagepub.com/doi/full/10.1177/1088357615583464?casa_token=uFEKy4D2l7MAAAAA%3AHuGFG2_ypow8VxrGPUmkxKw7XeBrYf1yjjjdjQ_xJYISN89djo7NGJJhnWGRqzF65aohRK-f6T8 
+
+
+We consider the alternating treatment design comparing anaphoric cueing with anaphoric cueing plus ABA for two individuals (m=2) over 8 time points (n=8). We are interested in the percentage correct on CBM probes. 
+
+The values obtained from the paper are saved into the treatment and control matrices respectively in the below code. 
+
+```{r}
+ex_n <- 8 # 8 observations per individual
+ex_m <- 2 # 2 individuals included in the study
+trt_m1 <- c(60,80,80,83)
+control_m1 <- c(50,40,60,38)
+trt_m2 <- c(90,70,80,90)
+control_m2 <- c(60,60,60,80)
+ex_trt_Y_mat <- rbind(trt_m1,trt_m2)
+ex_control_Y_mat <- rbind(control_m1,control_m2)
+results <- compute.atd(ex_m, ex_n, ex_control_Y_mat, ex_trt_Y_mat)
+results
+```
+
+# Example 2
+
+Paper: An alternating treatments comparison of oral and total communication training with minimally verbal retarded children.
+Author: Sisson and Barrett
+Link: https://www.ncbi.nlm.nih.gov/pmc/articles/PMC1307978/?page=4 
+
+We consider the alternating treatment design comparing oral and total communication for three individuals (m=3) over 60 time points (n=60).  
+
+The values obtained from the paper are saved into the treatment and control matrices respectively in the below code. While it is a bit difficult to tell, we assume that they start with the control before applying the treatment. 
+
+```{r}
+ex2_n <- 20 # 60 observations per individual
+ex2_m <- 3 # 3 individuals included in the study
+trt2_m1 <- c(0.5,0.75,0.25,1.25,1.25,1,1.5,3,3,0.2,3,2.5,3,3,3,2.5,2,1,2.6,3.1,2.9,3.4,3.6,3.4,3.6,3.1,3.4,3.5,3.7,3.7)
+control2_m1 <- c(1,2.1,1.4,2,1.5,1.5,1.5,1.6,1.6,1.6,1.5,2,1.6,2,1.6,1.5,1,2.2,1.75,1.5,1.75,2.1,2,2.1,1.75,1.6,1.9,2,1.75,2.1)
+trt2_m2 <- c(1,1,1,1.2,0.75,1.2,0.6,1.8,2,1.6,1.6,2,2,2.25,2.25,2,3,3.6,3.25,3,2.5,3,4,3.7,3.25,3,3,3,3.8,4)
+control2_m2 <- c(2,2,2,2,2,2,1.8,2,2,2,1.8,2,2,2.1,2.1,2,2,1.8,2.3,2.1,2.1,2.1,2.3,2.1,2.1,2.1,2.3,2.1,2.1,2.1)
+trt2_m3 <- c(0.5,0.7,0.9,0.9,1.25,1,1.25,1.25,1.7,1.5,1.1,1.1,1.25,rep(2.2,4),2,2,1.8,rep(2,4),1.8,2.1,2,2,2.35,2.35)
+control2_m3 <- c(rep(2,8),2.1,2,2,2.5,2,1.7,2,2,2,1.8,rep(2,4),2.2,rep(2,6),2.3)
+ex2_trt_Y_mat <- rbind(trt2_m1[21:30],trt2_m2[21:30],trt2_m3[21:30])
+ex2_control_Y_mat <- rbind(control2_m1[21:30],control2_m2[21:30],control2_m3[21:30])
+# Combine the treatment and control matrices
+results.2 <- compute.atd(ex2_m, ex2_n, ex2_control_Y_mat, ex2_trt_Y_mat)
+results.2
+
+```
+
+

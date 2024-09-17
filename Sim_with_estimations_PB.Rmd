@@ -1,0 +1,395 @@
+---
+title: "Simulating Alternating Treatment Designs Effect Sizes"
+authors: "Kayla Schroeder and Prathiba Batley"
+output: html_document
+---
+
+Defining Relevant Parameter Ranges of Interest
+
+```{r}
+
+my_m_vec <- seq(4,12,4)           # vector of number of people
+my_n_vec <- seq(10,50,10)          # vector of number of time points
+my_phi_vec <- seq(-0.9,0.9,0.2)       # vector of autocorrelations; constant; value ranges from -1 to 1
+
+# We fix sigma squared plus tau squared to be 1
+my_tau_sq_vec <- seq(0.0,0.8,0.2)    # vector of between person variances; constant; value is non-negative
+my_sigma_sq_vec <- 1 - my_tau_sq_vec  # vector of within person within time point variances; constant; value is non-negative
+
+my_mu <- 0          # constant; difference in the means between the treatment and control groups
+# we note that mu doesn’t matter since it drops out when we take the difference so we can simply assign mu to be 0
+
+my_alpha_ij_vec <- c(0.0,0.5,1)  # vector of effect sizes; constant; treatment effect for subject i at time point j; values range between 0 and 2 
+
+```
+
+Theoretical Distribution of $ES = \frac{Y}{S}\sqrt{b}$ using our estimates
+
+```{r}
+
+# Code up calculations done by hand here using the defined relative parameters above
+
+# Obtain the Expected Value of S^2:We know from the theory that the expected value of S^2 is sigma squared plus tau squared
+exp_s_sq <- my_sigma_sq_vec+my_tau_sq_vec
+
+# We know from the theory that the expected value of S^2 is sigma squared plus tau squared so clearly S^2 is an unbiased estimator so the known constant b is 1
+theory_b <- 1
+
+# Function to Calculate the A Matrix
+A_mat <- function(m, n){
+  list_of_As <- vector(mode='list', length=n)
+  vec_of_ones <- as.matrix(rep(1,m))
+  for (i in 1:n){
+    list_of_As[[i]] <- diag(rep(1,m)) - (vec_of_ones%*%t(vec_of_ones))/m
+  }
+  return(as.matrix(Matrix::bdiag(list_of_As)))
+}
+
+# Function to Calculate the Sigma Matrix
+
+sig_mat <- function(m, n, tau, sigma, phi){
+  all_i_matrices <- vector(mode='list', length=n)
+  for (i in 1:n){
+    row_matrices_list <- vector(mode='list', length=n)
+    for (j in 1:n){
+      row_matrices_list[[j]] <- (tau^2 + (sigma^2)*phi^abs(i-j))*as.matrix(diag(rep(1,m)))
+    }
+    # Combine all i th row matrices into a matrix
+    all_i_matrices[[i]] <- do.call(cbind, row_matrices_list)
+  }
+  # Combine all matrix rows 
+  return(do.call(rbind,all_i_matrices))
+  
+}
+
+# Now we create a function to get the theoretical values for df, non-centrality parameter and theoretical variance
+theory_func <- function(m, n, phi, tau_sq, sigma_sq, mu, alpha_ij, b){
+  # Get A matrix
+  theory_a_mat <- A_mat(m, n)
+  # Get sigma matrix
+  theory_sig_mat <- sig_mat(m, n, sqrt(tau_sq), sqrt(sigma_sq), phi)
+  
+  # Now we calculate the parameter rho to allow us to pull sigma squared and tau squared out of the sigma matrix
+  rho <- tau_sq/(sigma_sq+tau_sq)
+  
+  # We can then use rho to define a new matrix that is equivalent to the sigma matrix when multiplied by (sigma squared + tau squared). We will call this matrix sigma tilda
+  sig_tilda_mat <- theory_sig_mat/(sigma_sq+tau_sq)
+  
+  # Create a vector of alternating 1s and -1s to describe the alternating treatment structure for each individual
+  alt <- rep(c(rep(1,m),rep(-1,m)),n/2)
+  # This needs to be altered for the case of odd n 
+  
+  
+  # We use this to compute the known constant 'a' from the theorem in Hedges 2007 
+  # First we calculate the variance of the differences in the treatment and control
+  a <- as.matrix(t(alt))%*%(theory_sig_mat)%*%as.matrix(alt)
+  dim(a) <- NULL # this line is necessary to remove the matrix dimensions of 1 row, 1 column 
+  # Then we multiply by (2/mn)^2 since the sample size for both the treatment and the control groups is mn/2 (if we only consider even m and n values) so since this is the variance we square this value
+  a <- (a*4)/((m^2)*(n^2))
+  
+  # Compute trace of A*Sigma*A*Sigma
+  asigasig_tr <- sum(diag(theory_a_mat%*%theory_sig_mat%*%theory_a_mat%*%theory_sig_mat), na.rm = T)
+  
+  # Compute trace of A*SigmaTilda*A*SigmaTilda
+  asigtildaasigtilda_tr <- sum(diag(theory_a_mat%*%sig_tilda_mat%*%theory_a_mat%*%sig_tilda_mat), na.rm = T)
+  
+  # We use this value to compute the known constant 'c' from the theorem in Hedges 2007
+  c <- asigtildaasigtilda_tr/((n*(m-1))^2)  
+  
+  # Now we want to find the noncentral t distribution of described by the theorem in Hedges 2007
+  dist_df <- b^2/c
+  ncp <- sqrt(b/a)*(alpha_ij/sqrt(sigma_sq+tau_sq)) 
+  
+  # We know that the variance of the t distribution is df/(df-2) so we multiply this by (the square root of b/a)^2 to get the theoretical variance
+  theory_var <- (b/a)*dist_df/(dist_df-2) 
+  return(list("TheoreticalVariance"=theory_var,"df"=dist_df,"ncp"=ncp,"a"=a,"c"=c))
+  
+}
+```
+
+
+
+Actual Sampling Distribution of $ES = \frac{Y}{S}\sqrt{b}$ using estimates
+
+
+```{r}
+number_of_reps <- 10000
+
+est_simulation <- function(m, n, phi, tau_sq, sigma_sq, mu, alpha_ij){
+  results_mat <- matrix(NA, nrow = number_of_reps, ncol = 6)
+  for (reps in 1:number_of_reps){
+    # First we generate the sigma matrix that the distribution of epsilon is based upon using the autocorrelation and sigma squared values
+    sigma_mat <- matrix(NA, nrow=n, ncol=n)
+    for (k in 1:n){
+      for (l in 1:n){
+        sigma_mat[k,l] <- sigma_sq*(phi^abs(k-l))
+      }
+    }
+    # Create a matrix to fill with the simulated control values (assuming control is performed first)
+    control_Y_mat <- matrix(NA,nrow=m, ncol=n/2) 
+    # Create a matrix to fill with the simulated treatment values (assuming the treatment is applied after the control is measured one time)
+    trt_Y_mat <- matrix(NA,nrow=m, ncol=n/2)
+    # Now we sample values to generate a Y value for each m 
+    for (i in 1:m){
+      # Sample the person effect for person i
+      eta_i <- rnorm(1, mean=0, sd=sqrt(tau_sq)) 
+      # Sample the within person within time point error values for all n time points
+      epsilon_i_vals <- MASS::mvrnorm(1, mu=rep(0,n), Sigma = sigma_mat) 
+      # Create a vector of the control group epsilon values (assuming control is measured first in the alternating treatment design)
+      control_epsilons <- epsilon_i_vals[c(TRUE,FALSE)] 
+      # Create a vector of the treatment group epsilon values (assuming treatment is applied after the control is measured in the alternating treatment design)
+      treatment_epsilons <- epsilon_i_vals[c(FALSE,TRUE)]
+      # All Y values for individual control i's
+      control_Y_mat[i,] <- mu + eta_i + control_epsilons
+      # All Y values for individual treatment i's
+      trt_Y_mat[i,] <- mu + alpha_ij + eta_i + treatment_epsilons
+    }
+    # Combine the treatment and control matrices
+    full_Y_mat <- matrix(NA,nrow=m, ncol=n)
+    full_Y_mat[,(1:n)%%2==0] <- trt_Y_mat
+    full_Y_mat[,(1:n)%%2!=0] <- control_Y_mat
+    # Now we want to calculate the between person standard deviation for each time point
+    betw_ppl_sd <- apply(full_Y_mat,2,sd)
+    # Now we need the across person variance pooled across time points
+    samp_var <- (sum((m-1)*betw_ppl_sd^2, na.rm = T))/(n*m-n)
+    # We use this to calculate the effect size (Cohen's d)
+    cohens_d <- (mean(trt_Y_mat, na.rm = T)-mean(control_Y_mat, na.rm = T))/sqrt(samp_var)
+    
+    # Now we want to estimate the value of phi 
+    phase_length <- n/2 # length of each phase
+    N <- n # total number of observations
+    # Average across observations for individual i in phase 1 
+    y_a1_i_bar_dot <- rowSums(control_Y_mat, na.rm = T)/phase_length
+    # Average across observations for individual i in phase 2 
+    y_a2_i_bar_dot <- rowSums(trt_Y_mat, na.rm = T)/phase_length
+    # Calculate the deviations from treatment and control means for each observation (deviation from the observation's respective group)
+    deviation_Y_mat <- matrix(NA,nrow=m, ncol=N)
+    deviation_Y_mat[,(1:N)%%2==0] <- sweep(trt_Y_mat, 1, y_a2_i_bar_dot)
+    deviation_Y_mat[,(1:N)%%2!=0] <- sweep(control_Y_mat, 1, y_a1_i_bar_dot)
+    # Calculate the values of gamma i a when h = 0
+    # Control
+    #gamma_a1_i_h0 <- (1/phase_length)*rowSums((deviation_Y_mat[,(1:N)%%2!=0])^2)
+    gamma_a1_i_h0 <- (1/phase_length)*rowSums((deviation_Y_mat[,-c(N-1,N)])^2, na.rm = T)
+    # Treatment
+    #gamma_a2_i_h0 <- (1/phase_length)*rowSums((deviation_Y_mat[,(1:N)%%2==0])^2)
+    gamma_a2_i_h0 <- (1/phase_length)*rowSums((deviation_Y_mat[,-c(1,N)])^2, na.rm = T)
+    # Create vectors to store the gamma i values for h=0
+    # gamma_a1_i_h0 <- rep(NA,m)
+    # gamma_a2_i_h0 <- rep(NA,m)
+    # Create vectors to store the gamma i values for h=1
+    # gamma_a1_i_h1 <- rep(NA,m)
+    # gamma_a2_i_h1 <- rep(NA,m)
+    # Calculate the values of gamma i a when h = 1
+    # Control: we are not interested in the last observation since this is a treatment group observation. We transform the second matrix since we want the product of lag 0 and lag 1 deviations.
+    gamma_a1_i_h1 <- (1/phase_length)*diag(t(deviation_Y_mat[,-c(N-1,N)])%*%deviation_Y_mat[,-c(1,N)])
+    # Treatment: we are not interested in the first observation since this is a control group observation. We transform the second matrix since we want the product of lag 0 and lag 1 deviations.
+    gamma_a2_i_h1 <- (1/phase_length)*diag(t(deviation_Y_mat[,-c(1,N)])%*%deviation_Y_mat[,-c(1,2,N)])
+    # Old method (this is deviations squared we think so it doesn't work)
+    # for (i in 1:m){
+    # # Calculate the values of gamma i a when h = 0
+    # gamma_a1_i_h0[i] <- (1/phase_length)*sum((control_Y_mat[i,]-y_a1_i_bar_dot[i])^2)
+    # gamma_a2_i_h0[i] <- (1/phase_length)*sum((trt_Y_mat[i,]-y_a2_i_bar_dot[i])^2)
+    # Calculate the values of gamma i a when h = 1. Note that since there is a time lag of 1, we must use both the subsetted version of the matrix including all but its last value and the subsetted version of the matrix including all but its first value
+    # gamma_a1_i_h1[i] <- (1/phase_length)*as.numeric(t(control_Y_mat[i,-phase_length]-y_a1_i_bar_dot[i])%*%(control_Y_mat[i,-1]-y_a1_i_bar_dot[i]))
+    # gamma_a2_i_h1[i] <- (1/phase_length)*as.numeric(t(trt_Y_mat[i,-phase_length]-y_a2_i_bar_dot[i])%*%(trt_Y_mat[i,-1]-y_a2_i_bar_dot[i]))
+    # gamma_a1_i_h1[i] <- (1/phase_length)*sum((control_Y_mat[i,-phase_length]-y_a1_i_bar_dot[i])*(control_Y_mat[i,-1]-y_a1_i_bar_dot[i]))
+    # gamma_a2_i_h1[i] <- (1/phase_length)*sum((trt_Y_mat[i,-phase_length]-y_a2_i_bar_dot[i])*(trt_Y_mat[i,-1]-y_a2_i_bar_dot[i]))
+    #}
+    gamma_dot_dot_h0 <- (sum(gamma_a1_i_h0, na.rm = T)+sum(gamma_a2_i_h0, na.rm = T))/(2*m)
+    gamma_dot_dot_h1 <- (sum(gamma_a1_i_h1, na.rm = T)+sum(gamma_a2_i_h1, na.rm = T))/(2*m)
+    phi_hat <- (gamma_dot_dot_h1/gamma_dot_dot_h0) + (1/phase_length)
+    # Make sure the estimated autocorrelation is within the range of possible autocorrelations
+    if (phi_hat >= 1){
+      phi_hat <- 1 - .Machine$double.eps # offset to prevent division by 0 for b1
+    } else if (phi_hat <= -1){
+      phi_hat <- -1 +.Machine$double.eps # offset to prevent division by 0 for b1
+    }
+    
+    # We also want to estimate the value of rho
+    # First we calculate b1
+    b1_summation <- rep(NA,phase_length-1)
+    for (t in 1:(phase_length-1)){
+      b1_summation[t] <- (phi_hat^t)*(phase_length-t)
+    }
+    b1 <- (1/phase_length) + (2/(phase_length^2))*sum(b1_summation, na.rm = T)
+    rho_hat <- 1 - (gamma_dot_dot_h0/(1-b1))*(1/samp_var)
+    # Make sure rho value is within the range of possible values based on the constraint we set that tau squared plus sigma squared sums to 1 and we know that variances cannot be negative
+    if (rho_hat > 1){
+      rho_hat <- 1
+    } else if (rho_hat < 0){
+      rho_hat <- 0
+    }
+    
+    # Now we store the results of the analysis of the ith simulation (the effect size (Cohen's d) from the simulation in column 1, the mean of the control simulation in column 2, the mean of the treatment simulation in column 3, the across person variance pooled across time points in column 4, the estimated autocorrelation in column 5 and the estimated rho in column 6)
+    results_mat[reps,] <- c(cohens_d, mean(control_Y_mat, na.rm = T), mean(trt_Y_mat, na.rm = T), samp_var, phi_hat, rho_hat)
+  }
+  analysis_df <- as.data.frame(results_mat)
+  colnames(analysis_df) <- c("EffectSize","ControlMean","TrtMean","AcrossPersonVariancePooledAcrossTimePoints","PhiHat","RhoHat")
+  # Returns a list of (1) the data frame containing all the resulting effect sizes, control simulation means and treatment simulation means, (2) the overall average of all the simulation effect sizes, the overall variance of all the simulations, and the overall standard error of all the simulations
+  return(list("IndividualRepAnalysis" = analysis_df, "AverageEffectSize" = mean(analysis_df[,1]), "VarianceofEffectSizes" = var(as.vector(analysis_df[,1])), "OverallEffectSizeSE" =  var(as.vector(analysis_df[,1]))/sqrt(number_of_reps*n*m), "AverageEstimatedPhi" = mean(as.vector(analysis_df[,5])),"AverageEstimatedRho"=mean(as.vector(analysis_df[,6])))) 
+}
+
+```
+
+Running the Simulation
+
+
+```{r}
+#this is the format for estimating using simulations
+#est_sim_results <- est_simulation(my_m, my_n, my_phi, my_tau_sq, my_sigma_sq, my_mu, my_alpha_ij)
+
+```
+
+Create matrices to store all the estimates. 
+
+```{r}
+#params tau_sq_vec, phi_vec, m, n, es_true 
+#diags var, sd, bias, es, es_var, phi, rho, dcov, tcov
+norows <- length(my_m_vec)*length(my_n_vec) * length (my_phi_vec) * 
+  length(my_tau_sq_vec) * length(my_alpha_ij_vec)
+estimates <- matrix(NA, norows, 14)
+colnames(estimates) <- c("M", "N", "Phi", "Tau", "True_ES", "mean_es", "es_var", "rel_var", "rel_sd", "relbias_es",
+                         "phi", "rho", "dcoverage", "tcoverage")
+
+
+```
+
+
+Calculate the values
+
+```{r}
+# Plot: m = 4, n = 10  
+
+# Run the theoretical and simulation functions
+# We fix the effect size to be 0.4 as in the paper
+counter <- 1
+# Loop through the autocorrelation values
+for (m in 1:length(my_m_vec)){
+  am <- my_m_vec[m]
+  for (n in 1:length(my_n_vec)){
+    an <- my_n_vec[n]
+    for (i in 1:length(my_phi_vec)){
+      ai <- my_phi_vec[i]
+      # Loop through the tau squared values
+      for (j in 1:length(my_tau_sq_vec)) {
+        aj <- my_tau_sq_vec[j]
+        for (k in 1:length(my_alpha_ij_vec)){
+          ak <- my_alpha_ij_vec[k]
+          estimates[counter, 1:5] <- c(am, an, ai, aj, ak)
+          # First we run the simulation
+          sim_results <- est_simulation(am, an, ai, aj, my_sigma_sq_vec[j], my_mu, ak)
+          # Next we calculate the theoretical results
+          theoretical_results <- theory_func(am, an, sim_results$AverageEstimatedPhi, sim_results$AverageEstimatedRho, 1-sim_results$AverageEstimatedRho, my_mu, ak, theory_b)
+          
+          # Then we use this to calculate the exact variance 
+          exact_var <- ((theoretical_results$df*(1+theoretical_results$ncp^2))/(theoretical_results$df-2) - (theoretical_results$ncp^2)*(1-3/(4*theoretical_results$df-1))^-2)*theoretical_results$a
+          # Save the effect size average and the effect size variance average
+          estimates[counter,6:7] <- c(sim_results$AverageEffectSize, sim_results$VarianceofEffectSizes)
+          # Next we use this to calculate the empirical variance
+          empirical_var <- theoretical_results$a + (sim_results$AverageEffectSize^2)/(2*theoretical_results$df)
+          # Using these values, we get the relative variance by dividing the empirical variance by the theoretical variance
+          # Relative standard deviation is calculated by taking the square root of the numerator and denominator
+          # Now we calculate the relative bias by dividing the bias by the effect size
+          # Finally, we save the estimated phi and rho values to their respective matrices
+          estimates[counter,8:12] <- c(empirical_var/exact_var, sqrt(empirical_var)/sqrt(exact_var),
+                                       (sim_results$AverageEffectSize - ak)/ak,
+                                       sim_results$AverageEstimatedPhi,
+                                       sim_results$AverageEstimatedRho)
+          
+          # Then calculate the theoretical effect size
+          effectsize_theory <-ak/sqrt(1)
+          # Cohen's d
+          # We first calculate the variance for this case using the formula for variance of Cohen's d
+          cohens_var <- theoretical_results$a + (sim_results$IndividualRepAnalysis[,1]^2)/(2*theoretical_results$df)
+          
+          # Then we use this variance to calculate the 95% CI for the effect size
+          cohens_ci_upper_bound <- sim_results$IndividualRepAnalysis[,1] + 1.96*sqrt(cohens_var)
+          cohens_ci_lower_bound <- sim_results$IndividualRepAnalysis[,1] - 1.96*sqrt(cohens_var)
+          estimates[counter,13] <- sum(effectsize_theory>=cohens_ci_lower_bound&effectsize_theory<=cohens_ci_upper_bound)/length(cohens_ci_lower_bound)
+          # Noncentral t distribution
+          # We first calculate the variance for this case using the formula for the exact variance of a noncentral t distribution (using the approximation)
+          exact_var <- (theoretical_results$df*(1+theoretical_results$ncp^2))/(theoretical_results$df-2) - (theoretical_results$ncp^2)*(1-3/(4*theoretical_results$df-1))^-2
+          # Then we use this to calculate the 95% CI, dividing the variance by 'a' per the theorem in Hedges 2007
+          exact_ci_upper_bound <- sim_results$IndividualRepAnalysis[,1] + 1.96*sqrt(exact_var*theoretical_results$a)
+          exact_ci_lower_bound <- sim_results$IndividualRepAnalysis[,1] - 1.96*sqrt(exact_var*theoretical_results$a)
+          # Now we want to calculate the proportion of resulting confidence intervals from the simulation that contain the true effect size 
+          estimates[counter,14] <- sum(effectsize_theory>=exact_ci_lower_bound&effectsize_theory<=exact_ci_upper_bound)/length(exact_ci_lower_bound)
+          counter <- counter + 1
+        }
+        
+      }
+    }
+  }
+}
+
+write.csv(estimates, "estimates.csv")
+
+```
+
+Diagnostics
+
+```{r}
+estimates.d <- data.frame(estimates)
+
+mean_es_diag <- aov(mean_es ~ M + N + Phi + Tau + True_ES + M*N + M*Phi + M*Tau + M*(True_ES) + 
+      N*Phi + N* Tau + N*True_ES + Phi*Tau + Phi*(True_ES) + Tau*(True_ES), estimates.d)
+diags <- data.frame(summary(mean_es_diag)[[1]])
+
+mean_es_var_diag <- aov(es_var ~ M + N + Phi + Tau + True_ES + M*N + M*Phi + M*Tau + M*(True_ES) + 
+      N*Phi + N* Tau + N*True_ES + Phi*Tau + Phi*(True_ES) + Tau*(True_ES), estimates.d)
+diags <- cbind(diags, summary(mean_es_var_diag)[[1]][,2])
+
+mean_rel_sd_diag <- aov(rel_sd ~ M + N + Phi + Tau + True_ES + M*N + M*Phi + M*Tau + M*(True_ES) + 
+      N*Phi + N* Tau + N*True_ES + Phi*Tau + Phi*(True_ES) + Tau*(True_ES), estimates.d)
+diags <- cbind(diags, summary(mean_rel_sd_diag)[[1]][,2])
+
+phi_diag <- aov(phi ~ M + N + Phi + Tau + True_ES + M*N + M*Phi + M*Tau + M*(True_ES) + 
+      N*Phi + N* Tau + N*True_ES + Phi*Tau + Phi*(True_ES) + Tau*(True_ES), estimates.d)
+diags <- cbind(diags, summary(phi_diag)[[1]][,2])
+
+rho_diag <- aov(rho ~ M + N + Phi + Tau + True_ES + M*N + M*Phi + M*Tau + M*(True_ES) + 
+      N*Phi + N* Tau + N*True_ES + Phi*Tau + Phi*(True_ES) + Tau*(True_ES), estimates.d)
+diags <- cbind(diags, summary(rho_diag)[[1]][,2])
+
+dcoverage_diag <- aov(dcoverage ~ M + N + Phi + Tau + True_ES + M*N + M*Phi + M*Tau + M*(True_ES) + 
+      N*Phi + N* Tau + N*True_ES + Phi*Tau + Phi*(True_ES) + Tau*(True_ES), estimates.d)
+diags <- cbind(diags, summary(dcoverage_diag)[[1]][,2])
+
+tcoverage_diag <- aov(rho ~ M + N + Phi + Tau + True_ES + M*N + M*Phi + M*Tau + M*(True_ES) + 
+      N*Phi + N* Tau + N*True_ES + Phi*Tau + Phi*(True_ES) + Tau*(True_ES), estimates.d)
+diags <- cbind(diags, summary(tcoverage_diag)[[1]][,2])
+
+
+colnames(diags)[6:11] <- c("es_var", "rel_sd", "phi", "rho", "dcoverage", "tcoverage")
+
+diags <- rbind(diags, colSums(diags))
+rownames(diags)[17] <- c("total")
+diags <- diags[, c(-3, -4, -5)]
+anovas <- matrix(NA, 17, 8)
+for (i in 1:8){
+  anovas[, i] <- 100*diags[, i]/diags[17, i]
+}
+rownames(anovas) <- rownames(diags)
+colnames(anovas) <- colnames(diags)
+colnames(anovas)[2] <- "mean_es"
+anovas <- round(anovas, digits = 2)
+write.csv(anovas, "ANOVAS.csv")
+```
+
+
+```{r}
+
+interaction.plot(estimates.d$M, estimates.d$Phi, estimates.d$es_var, fun = mean, type = "l",
+                 col = 1:10,
+                 legend = TRUE)
+interaction.plot(estimates.d$N, estimates.d$Phi, estimates.d$dcoverage, fun = mean, type = "l",
+                 col = 1:10,
+                 legend = TRUE)
+interaction.plot(estimates.d$Tau, estimates.d$M, estimates.d$tcoverage, fun = mean, type = "l",
+                 legend = TRUE)
+plot(density(estimates.d$tcoverage - estimates.d$dcoverage))
+summary(estimates.d$tcoverage - estimates.d$dcoverage)
+
+```
+
+
